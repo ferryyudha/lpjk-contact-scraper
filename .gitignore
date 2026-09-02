@@ -9,6 +9,8 @@ dist/
 .vscode/
 .idea/
 hasil_scraping/
+test_out/
+*.zip
 
 # File testing (tidak perlu di-push)
 test_app.py
