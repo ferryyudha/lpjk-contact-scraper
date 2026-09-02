@@ -9,6 +9,8 @@ import customtkinter as ctk
 from scraper import LPJKScraper, PROVINSI_LIST, fetch_kabupaten
 from export import export_to_excel, export_to_csv, export_to_json
 
+APP_VERSION = "1.0.0"
+
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
@@ -16,7 +18,7 @@ class LPJKScraperApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("LPJK PUPR Contact Scraper - WhatsApp & Email Extractor")
+        self.title(f"LPJK PUPR Contact Scraper v{APP_VERSION} - WhatsApp & Email Extractor")
         self.geometry("1280x820")
         self.minsize(1080, 700)
 
