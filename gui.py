@@ -27,7 +27,6 @@ class LPJKScraperApp(ctk.CTk):
         self.init_layout()
 
     def init_layout(self):
-        # Configure grid 1x2 (Sidebar & Main content)
         self.grid_columnconfigure(0, weight=0, minsize=370)
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -209,9 +208,6 @@ class LPJKScraperApp(ctk.CTk):
         )
         self.btn_open_folder.grid(row=21, column=0, padx=14, pady=(0, 12), sticky="ew")
 
-        # ==========================================
-        # RIGHT MAIN AREA (METRICS, TABLE, LOGS)
-        # ==========================================
         self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.main_frame.grid(row=0, column=1, sticky="nsew", padx=20, pady=20)
         self.main_frame.grid_columnconfigure(0, weight=1)
@@ -357,21 +353,18 @@ class LPJKScraperApp(ctk.CTk):
         self.log("Mode: 'Ambil SEMUA Data' aktif secara default (tanpa batas).")
 
     def toggle_all_pages(self):
-        """Toggle page limit entry enabled/disabled based on checkbox."""
         if self.chk_all_pages.get():
             self.entry_pages.configure(state="disabled")
         else:
             self.entry_pages.configure(state="normal")
 
     def log(self, message):
-        """Append message to log console."""
         timestamp = datetime.datetime.now().strftime("%H:%M:%S")
         formatted = f"[{timestamp}] {message}\n"
         self.log_textbox.insert("end", formatted)
         self.log_textbox.see("end")
 
     def on_provinsi_change(self, choice):
-        """Asynchronously load regencies for selected province."""
         if choice == "Semua Provinsi" or choice == "Nasional":
             self.cb_kabupaten.configure(values=["Semua Kabupaten"])
             self.cb_kabupaten.set("Semua Kabupaten")
@@ -389,13 +382,11 @@ class LPJKScraperApp(ctk.CTk):
         threading.Thread(target=load, daemon=True).start()
 
     def update_metrics(self, total, wa, email):
-        """Update KPI metrics display."""
         self.lbl_card_total_val.configure(text=f"{total:,}")
         self.lbl_card_wa_val.configure(text=f"{wa:,}")
         self.lbl_card_email_val.configure(text=f"{email:,}")
 
     def update_status(self, text, progress_val, metrics):
-        """Thread-safe UI status update."""
         self.after(0, lambda: self._apply_status(text, progress_val, metrics))
 
     def _apply_status(self, text, progress_val, metrics):
@@ -406,7 +397,6 @@ class LPJKScraperApp(ctk.CTk):
             self.update_metrics(metrics.get("total", 0), metrics.get("wa", 0), metrics.get("email", 0))
 
     def add_row_to_table(self, item):
-        """Insert scraped item into Treeview table."""
         self.after(0, lambda: self.tree.insert("", "end", values=(
             item.get("no", ""),
             item.get("nama", ""),
@@ -420,12 +410,10 @@ class LPJKScraperApp(ctk.CTk):
         )))
 
     def submit_search_now(self):
-        """Allow user to force submit the search form."""
         if self.scraper and self.is_scraping:
             self.scraper.submit_search_now()
 
     def start_scraping_thread(self):
-        """Validate input and launch scraping in background thread."""
         if self.is_scraping:
             return
 
@@ -439,7 +427,7 @@ class LPJKScraperApp(ctk.CTk):
         kual_val = self.kual_map.get(kual_choice, "")
 
         if self.chk_all_pages.get():
-            pages = 0  # 0 means unlimited pages
+            pages = 0
         else:
             try:
                 pages = int(self.entry_pages.get().strip())
@@ -453,7 +441,6 @@ class LPJKScraperApp(ctk.CTk):
         fetch_details = bool(self.switch_details.get())
         show_browser = bool(self.switch_browser.get())
 
-        # Clear previous table results
         for row in self.tree.get_children():
             self.tree.delete(row)
         self.scraped_data = []
@@ -510,7 +497,6 @@ class LPJKScraperApp(ctk.CTk):
             )
 
     def stop_scraping(self):
-        """User stops scraping."""
         if self.scraper:
             self.scraper.stop()
         self.btn_stop.configure(state="disabled")
@@ -518,7 +504,6 @@ class LPJKScraperApp(ctk.CTk):
         self.log("Meminta scraper berhenti. Seluruh data yang sudah terkumpul tersimpan dengan aman!")
 
     def export_excel(self):
-        """Export current data to Excel (.xlsx)."""
         if not self.scraped_data:
             messagebox.showwarning("Peringatan", "Belum ada data hasil scraping untuk diekspor.")
             return
@@ -545,7 +530,6 @@ class LPJKScraperApp(ctk.CTk):
                 messagebox.showerror("Error Ekspor", f"Gagal mengekspor data: {e}")
 
     def export_csv(self):
-        """Export current data to CSV (.csv)."""
         if not self.scraped_data:
             messagebox.showwarning("Peringatan", "Belum ada data hasil scraping untuk diekspor.")
             return
@@ -570,13 +554,11 @@ class LPJKScraperApp(ctk.CTk):
                 messagebox.showerror("Error Ekspor", f"Gagal mengekspor data: {e}")
 
     def open_output_folder(self):
-        """Open the results folder in Windows Explorer."""
         out_dir = os.path.join(os.getcwd(), "hasil_scraping")
         os.makedirs(out_dir, exist_ok=True)
         os.startfile(out_dir)
 
     def on_closing(self):
-        """Cleanup before exit."""
         if self.scraper:
             self.scraper.close()
         self.destroy()
