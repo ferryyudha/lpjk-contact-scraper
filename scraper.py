@@ -15,12 +15,12 @@ KABUPATEN_API = "https://lpjk.pu.go.id/laporan-lpjk/kabupaten/{}"
 AUTOSAVE_INTERVAL = 50
 MAX_WAIT_SECONDS = 240
 
-# Indonesian mobile operator prefixes (valid as of 2024)
-# Pattern matches 08xx and +628xx — intentionally excludes tracking codes like 023040xxx
+# Prefix operator seluler Indonesia yang valid (per 2024)
+# Sengaja tidak pakai \d+ generik supaya nomor resi/sertifikat SBU tidak ikut tertangkap
 MOBILE_PATTERN = r'(?:\+?62|0)8(?:1[1-9]|2[1-3]|3[1-38]|5[1-35-9]|7[78]|8[1-9]|9[5-9])[0-9\s\-]{6,9}[0-9]'
 
-# Landline: area code 2-4 digits + subscriber, total 9-11 digits
-# Strict upper limit avoids matching SBU/license certificate numbers
+# Telepon kabel: kode area 2-4 digit + nomor pelanggan, total 9-11 digit
+# Batas atas 11 digit penting — angka lebih panjang biasanya nomor dokumen, bukan telepon
 LANDLINE_PATTERN = r'(?:\(0\d{2,4}\)|0\d{2,4})[\s\-]?[1-9]\d{5,7}'
 
 EMAIL_PATTERN = r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+'
@@ -183,7 +183,7 @@ class LPJKScraper:
         if provinsi:
             try:
                 Select(self.driver.find_element(By.ID, "propinsi")).select_by_value(provinsi)
-                time.sleep(1.5)  # wait for kabupaten AJAX to load
+                time.sleep(1.5)  # tunggu AJAX kabupaten selesai load
             except Exception as e:
                 self.log(f"Gagal pilih provinsi: {e}")
 
@@ -218,7 +218,7 @@ class LPJKScraper:
         start = time.time()
         while self.is_running and (time.time() - start < MAX_WAIT_SECONDS):
             try:
-                # auto-submit if captcha token is already solved
+                # auto-submit kalau token captcha sudah terisi (user sudah centang)
                 token_el = self.driver.find_elements(By.ID, "g-recaptcha-response")
                 if token_el and len(token_el[0].get_attribute("value") or "") > 0:
                     if "searching" not in self.driver.current_url.lower():
