@@ -45,20 +45,40 @@ Fallback ke klik modal tetap ada kalau AJAX gagal (misalnya URL detail berubah f
 
 ---
 
-## Kenapa DataTables di-set ke 100 baris per halaman?
+## Kenapa DataTables di-set ke 25 baris per halaman?
 
-Default-nya 10 baris. Berarti untuk 17.900 data butuh 1.790 kali pindah halaman.
-Dengan 100 baris: cukup 179 halaman. 10x lebih cepat.
+Awalnya dicoba 100 baris per halaman. Namun server LPJK sangat sensitif terhadap frekuensi request detail AJAX.
+Dengan 100 baris, server sering merespons dengan status `HTTP 429 Too Many Requests`, menyebabkan data detail perusahaan menduplikasi data sebelumnya karena modal DOM `#smallBody` tidak sempat di-refresh.
+Oleh karena itu, pagination diturunkan ke `25` baris per halaman dan diberi jitter delay 1.5 - 2.5 detik per baris untuk menjaga kestabilan koneksi.
 
-LPJK pakai DataTables standar, jadi tinggal set `select[name="TABLE_1_length"]` ke nilai `100`.
-Kalau nilai `100` tidak ada di opsi dropdown DataTables-nya, fallback ke `50` lalu `25`.
+---
+
+## Mekanisme Anti-Rate Limiting (HTTP 429) & Duplikasi Data
+
+1. **Pre-clear DOM Modal**: Setiap kali memanggil request detail, konten `#smallBody` dikosongkan terlebih dahulu via `$('#smallBody').empty()` agar data perusahaan sebelumnya tidak tertinggal.
+2. **Auto-Cooldown Backoff**: Jika server LPJK mengembalikan status HTTP 429, scraper berhenti sejenak (cooldown 15-30 detik) lalu mencoba kembali.
+3. **In-Place Auto-Retry (2x)**: Jika request detail timeout/gagal, otomatis dicoba ulang hingga 2 kali dengan jeda progresif (5s, 10s).
+4. **Second Pass Recovery**: Baris yang tetap gagal/ter-skip akan dikumpulkan ke dalam list `skipped_items`. Setelah semua halaman selesai, dilakukan proses *second pass* secara otomatis dengan request langsung ke endpoint detail dan mengupdate baris yang ada di antarmuka GUI secara real-time.
+
+---
+
+## Penyederhanaan Kolom Ekspor (v1.0.4)
+
+Kolom seperti `No Telepon Kantor`, `Pimpinan / PJBU`, `NPWP`, `Kualifikasi`, `Alamat Lengkap`, dan `Status / Subklasifikasi` dihapus dari berkas ekspor.
+Fokus ekspor adalah data kontak cepat untuk outreach:
+- `No`
+- `Nama Badan Usaha`
+- `WhatsApp (62...)`
+- `Link WhatsApp`
+- `Email Perusahaan`
+- `Provinsi`
+- `Kabupaten / Kota`
 
 ---
 
 ## Selector yang rapuh dan kemungkinan rusak
 
-Semua ini bergantung pada struktur HTML portal LPJK per saat ini (September 2025).
-Kalau PUPR update tampilan, perlu dicek ulang:
+Semua ini bergantung pada struktur HTML portal LPJK per saat ini:
 
 - `#TABLE_1` → ID tabel hasil pencarian
 - `#TABLE_1_length` → dropdown jumlah baris per halaman
@@ -82,19 +102,9 @@ Bukan 100 atau 10. Alasannya:
 
 ---
 
-## Export JSON tidak diekspos ke UI
+## Bundel Standalone Executable (PyInstaller)
 
-Ada fungsi `export_to_json` di `export.py` tapi tidak ada tombolnya di GUI.
-Belum diminta, jadi tidak dibuatkan. Kalau nanti perlu tinggal tambah tombol dan hubungkan.
-Fungsinya sudah jalan, tidak perlu ubah apapun di `export.py`.
+Agar Selenium dan WebDriver dapat berjalan mulus di komputer user tanpa Python:
+- `LPJK_Contact_Scraper.spec` menggunakan `collect_all('selenium')` dan `collect_all('webdriver_manager')`.
+- Menjamin modul subpackage dynamic import dan binary `selenium-manager.exe` disertakan ke dalam bundel `.exe`.
 
----
-
-## Sidebar pakai CTkScrollableFrame
-
-Awalnya pakai `CTkFrame` biasa.
-Di monitor dengan scaling Windows 125% atau layar kecil, tombol ekspor di bagian bawah sidebar terpotong/tidak kelihatan.
-Ganti ke `CTkScrollableFrame` — isinya bisa di-scroll, semua tombol tetap bisa diakses.
-
-Side effect: ada scrollbar kecil di sisi kanan sidebar yang muncul meski konten tidak penuh.
-Belum ketemu cara hide scrollbar-nya di CustomTkinter tanpa hack kotor, jadi dibiarkan.
