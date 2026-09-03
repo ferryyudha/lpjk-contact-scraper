@@ -7,7 +7,7 @@ from tkinter import ttk, messagebox, filedialog
 import customtkinter as ctk
 
 from scraper import LPJKScraper, PROVINSI_LIST, fetch_kabupaten
-from export import export_to_excel, export_to_csv, export_to_json
+from export import export_to_excel, export_to_csv
 
 APP_VERSION = "1.0.1"
 

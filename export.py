@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -103,4 +104,10 @@ def export_to_excel(data_list, output_path):
 
 def export_to_csv(data_list, output_path):
     pd.DataFrame(data_list).to_csv(output_path, index=False, encoding="utf-8-sig")
+    return output_path
+
+
+def export_to_json(data_list, output_path):
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(data_list, f, ensure_ascii=False, indent=2)
     return output_path
