@@ -9,7 +9,7 @@ import customtkinter as ctk
 from scraper import LPJKScraper, PROVINSI_LIST, fetch_kabupaten
 from export import export_to_excel, export_to_csv
 
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -399,7 +399,7 @@ class LPJKScraperApp(ctk.CTk):
             self.update_metrics(metrics.get("total", 0), metrics.get("wa", 0), metrics.get("email", 0))
 
     def add_row_to_table(self, item):
-        self.after(0, lambda: self.tree.insert("", "end", values=(
+        self.after(0, lambda: self.tree.insert("", "end", iid=str(item.get("no", "")), values=(
             item.get("no", ""),
             item.get("nama", ""),
             item.get("whatsapp", "") or "-",
@@ -410,6 +410,24 @@ class LPJKScraperApp(ctk.CTk):
             item.get("npwp", ""),
             item.get("pimpinan", "") or "-"
         )))
+
+    def update_row_in_table(self, item):
+        """Update kolom kontak baris yang sudah ada di tabel (dipanggil oleh second pass)."""
+        row_id = str(item.get("no", ""))
+        def _do_update():
+            if self.tree.exists(row_id):
+                self.tree.item(row_id, values=(
+                    item.get("no", ""),
+                    item.get("nama", ""),
+                    item.get("whatsapp", "") or "-",
+                    item.get("email", "") or "-",
+                    item.get("telepon", "") or "-",
+                    item.get("provinsi", ""),
+                    item.get("kabupaten", ""),
+                    item.get("npwp", ""),
+                    item.get("pimpinan", "") or "-"
+                ))
+        self.after(0, _do_update)
 
     def submit_search_now(self):
         if self.scraper and self.is_scraping:
@@ -458,7 +476,8 @@ class LPJKScraperApp(ctk.CTk):
             self.scraper = LPJKScraper(
                 log_callback=lambda msg: self.after(0, lambda: self.log(msg)),
                 status_callback=self.update_status,
-                row_callback=self.add_row_to_table
+                row_callback=self.add_row_to_table,
+                update_row_callback=self.update_row_in_table
             )
             results = self.scraper.scrape(
                 keyword=keyword,

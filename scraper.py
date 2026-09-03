@@ -130,13 +130,16 @@ def extract_contact_info(html_content, plain_text=""):
 
 
 class LPJKScraper:
-    def __init__(self, log_callback=None, status_callback=None, row_callback=None):
+    def __init__(self, log_callback=None, status_callback=None, row_callback=None, update_row_callback=None):
         self.log_callback = log_callback or (lambda msg: None)
         self.status_callback = status_callback or (lambda txt, prog, metrics: None)
         self.row_callback = row_callback or (lambda row: None)
+        # Dipanggil saat second pass berhasil update data baris yang sebelumnya ter-skip
+        self.update_row_callback = update_row_callback or (lambda row: None)
         self.driver = None
         self.is_running = False
         self.results = []
+        self.skipped_items = []  # Menyimpan item yang gagal di-fetch detail-nya
 
     def log(self, message):
         self.log_callback(message)
@@ -416,7 +419,24 @@ class LPJKScraper:
 
                     detail_success = False
                     if fetch_details:
+                        # Percobaan pertama
                         detail_html, detail_success = self._fetch_row_detail(tds, company_name=nama_bu)
+
+                        # Auto-retry 2x jika gagal (bukan karena user stop)
+                        if not detail_success and self.is_running:
+                            for retry_attempt in range(2):
+                                cooldown = 5 * (retry_attempt + 1)
+                                self.log(f"↩️ Retry {retry_attempt + 1}/2 untuk '{nama_bu}' dalam {cooldown} detik...")
+                                for _ in range(cooldown):
+                                    if not self.is_running:
+                                        break
+                                    time.sleep(1)
+                                if not self.is_running:
+                                    break
+                                detail_html, detail_success = self._fetch_row_detail(tds, company_name=nama_bu)
+                                if detail_success:
+                                    break
+
                         if detail_html:
                             contact = extract_contact_info(detail_html)
 
@@ -462,7 +482,9 @@ class LPJKScraper:
                         extra_alamat = f" (Alamat: {contact['alamat'][:35]}...)" if contact['alamat'] else ""
                         self.log(f"[{global_no - 1}] {nama_bu} | Detail dimuat (Kontak tidak dicantumkan di LPJK){extra_alamat}")
                     else:
-                        self.log(f"[{global_no - 1}] ⚠️ {nama_bu} | Gagal memuat detail (Server LPJK timeout/skip)")
+                        # Tandai baris ini untuk second pass
+                        self.skipped_items.append({"item": item, "tds_idx": len(self.results) - 1})
+                        self.log(f"[{global_no - 1}] ⚠️ {nama_bu} | Gagal memuat detail — ditandai untuk second pass")
 
                 except Exception as e:
                     self.log(f"Error parsing baris {row_idx + 1}: {e}")
@@ -486,6 +508,90 @@ class LPJKScraper:
                 break
 
         return total_wa, total_email
+
+    def _second_pass(self):
+        """Memproses ulang baris yang sebelumnya gagal di-fetch detail-nya."""
+        if not self.skipped_items:
+            return
+
+        total_skipped = len(self.skipped_items)
+        self.log("-" * 50)
+        self.log(f"🔄 Second Pass: Memproses ulang {total_skipped} baris yang ter-skip...")
+        self.log("-" * 50)
+        self.status_callback(
+            f"Second Pass: Memproses ulang {total_skipped} data yang ter-skip...",
+            0.95,
+            {"total": len(self.results), "wa": sum(1 for r in self.results if r.get('whatsapp')), "email": sum(1 for r in self.results if r.get('email'))}
+        )
+
+        recovered = 0
+        for idx, skip_info in enumerate(self.skipped_items):
+            if not self.is_running:
+                break
+
+            item = skip_info["item"]
+            result_idx = skip_info["tds_idx"]
+            nama_bu = item["nama"]
+
+            self.log(f"[Second Pass {idx + 1}/{total_skipped}] Retry: {nama_bu}...")
+            self.status_callback(
+                f"Second Pass {idx + 1}/{total_skipped}: {nama_bu[:40]}...",
+                0.95,
+                {"total": len(self.results), "wa": sum(1 for r in self.results if r.get('whatsapp')), "email": sum(1 for r in self.results if r.get('email'))}
+            )
+
+            # Navigasi ke halaman LPJK dan coba fetch langsung via URL detail
+            # Kita manfaatkan URL yang sebelumnya tersimpan di data-attr
+            # Karena tds tidak tersedia, kita gunakan requests langsung via AJAX dengan NPWP
+            detail_url = f"https://lpjk.pu.go.id/laporan-lpjk/sebaran/detail/{item.get('npwp', '')}"
+            detail_html = ""
+            try:
+                script = f"""
+                var done = arguments[arguments.length - 1];
+                $.ajax({{
+                    url: '{detail_url}',
+                    type: 'GET',
+                    timeout: 12000,
+                    success: function(data) {{ done({{ status: 200, html: data }}); }},
+                    error: function(xhr) {{ done({{ status: xhr.status || 0, html: '' }}); }}
+                }});
+                """
+                res = self.driver.execute_async_script(script)
+                status = res.get("status", 0) if isinstance(res, dict) else 0
+                html_content = res.get("html", "") if isinstance(res, dict) else ""
+                if status == 200 and html_content and len(html_content.strip()) > 50:
+                    detail_html = html_content
+            except Exception as e:
+                self.log(f"  Gagal second pass AJAX: {e}")
+
+            if detail_html:
+                contact = extract_contact_info(detail_html)
+                # Update data di self.results
+                if result_idx < len(self.results):
+                    self.results[result_idx].update({
+                        "whatsapp": contact["whatsapp"],
+                        "wa_link": contact["wa_link"],
+                        "email": contact["email"],
+                        "telepon": contact["telepon"],
+                        "pimpinan": contact["pimpinan"],
+                        "alamat": contact["alamat"],
+                    })
+                    # Update tampilan di tabel GUI
+                    self.update_row_callback(self.results[result_idx])
+                    recovered += 1
+                    wa_log = contact["whatsapp"] or "-"
+                    em_log = contact["email"] or "-"
+                    self.log(f"  ✅ Berhasil! | WA: {wa_log} | Email: {em_log}")
+            else:
+                self.log(f"  ❌ Tetap gagal setelah second pass.")
+
+            # Cooldown antar baris second pass lebih santai
+            time.sleep(random.uniform(2.0, 3.5))
+
+        self.skipped_items = []
+        self.log("-" * 50)
+        self.log(f"🔄 Second Pass selesai. {recovered}/{total_skipped} data berhasil dipulihkan.")
+        self.log("-" * 50)
 
     def scrape(self, keyword="", jenis="nama", provinsi="", kabupaten="", kualifikasi="",
                max_pages=0, fetch_details=True, headless=False):
@@ -533,7 +639,15 @@ class LPJKScraper:
             self._set_table_page_size()
             total_records = self._detect_total_records()
 
+            self.skipped_items = []
             total_wa, total_email = self._extract_rows(fetch_details, total_records)
+
+            # Second pass: proses ulang semua baris yang ter-skip
+            if fetch_details and self.skipped_items and self.is_running:
+                self._second_pass()
+                # Hitung ulang total WA & Email setelah second pass
+                total_wa = sum(1 for r in self.results if r.get("whatsapp"))
+                total_email = sum(1 for r in self.results if r.get("email"))
 
             self._auto_save()
 
