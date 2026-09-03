@@ -1,6 +1,7 @@
 import time
 import re
 import os
+import random
 import requests
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -250,10 +251,11 @@ class LPJKScraper:
             length_el = self.driver.find_elements(By.NAME, "TABLE_1_length")
             if length_el:
                 sel = Select(length_el[0])
-                for val in ["100", "50", "25"]:
+                # Gunakan 25 atau 50 baris per halaman agar tidak memicu rate-limit server LPJK
+                for val in ["25", "50", "10"]:
                     try:
                         sel.select_by_value(val)
-                        self.log(f"Tabel diset {val} baris per halaman.")
+                        self.log(f"Tabel diset {val} baris per halaman untuk stabilitas request.")
                         time.sleep(2)
                         break
                     except Exception:
@@ -276,7 +278,7 @@ class LPJKScraper:
             self.log(f"Gagal membaca total data: {e}")
         return 0
 
-    def _fetch_row_detail(self, tds):
+    def _fetch_row_detail(self, tds, company_name=""):
         detail_href = ""
         detail_btn = None
         if len(tds) >= 6:
@@ -287,32 +289,86 @@ class LPJKScraper:
                 pass
 
         detail_html = ""
-        if detail_href:
-            try:
-                script = f"""
-                var done = arguments[arguments.length - 1];
-                $.ajax({{
-                    url: '{detail_href}',
-                    type: 'GET',
-                    timeout: 8000,
-                    success: function(data) {{ done(data); }},
-                    error: function() {{ done(''); }}
-                }});
-                """
-                detail_html = self.driver.execute_async_script(script)
-            except Exception as e:
-                self.log(f"Gagal fetch detail via AJAX: {e}")
 
+        # 1. Bersihkan buffer modal terlebih dahulu agar data perusahaan sebelumnya tidak tertinggal
+        try:
+            self.driver.execute_script("if (typeof $ !== 'undefined' && $('#smallBody').length) { $('#smallBody').empty(); }")
+        except Exception:
+            pass
+
+        if detail_href:
+            max_retries = 3
+            for attempt in range(max_retries):
+                if not self.is_running:
+                    return ""
+                try:
+                    script = f"""
+                    var done = arguments[arguments.length - 1];
+                    $.ajax({{
+                        url: '{detail_href}',
+                        type: 'GET',
+                        timeout: 10000,
+                        success: function(data) {{ done({{ status: 200, html: data }}); }},
+                        error: function(xhr) {{ done({{ status: xhr.status || 0, html: '' }}); }}
+                    }});
+                    """
+                    res = self.driver.execute_async_script(script)
+                    status = res.get("status", 0) if isinstance(res, dict) else 200
+                    html_content = res.get("html", "") if isinstance(res, dict) else (res or "")
+
+                    if status == 429:
+                        wait_sec = 15 * (attempt + 1)
+                        self.log(f"⚠️ Server LPJK limit (HTTP 429). Cooldown {wait_sec} detik sebelum retry...")
+                        for _ in range(wait_sec):
+                            if not self.is_running:
+                                return ""
+                            time.sleep(1)
+                        continue
+                    elif status == 200 and html_content:
+                        detail_html = html_content
+                        break
+                    else:
+                        break
+                except Exception as e:
+                    self.log(f"Gagal fetch detail via AJAX: {e}")
+                    break
+
+        # 2. Fallback modal jika AJAX tidak berhasil
         if not detail_html and detail_btn:
             try:
+                self.driver.execute_script("if (typeof $ !== 'undefined' && $('#smallBody').length) { $('#smallBody').empty(); }")
                 self.driver.execute_script("arguments[0].click();", detail_btn)
-                time.sleep(1)
-                modal_body = self.driver.find_element(By.ID, "smallBody")
-                detail_html = modal_body.get_attribute("innerHTML")
-                close_btn = self.driver.find_element(By.CSS_SELECTOR, "#smallModal .close")
-                self.driver.execute_script("arguments[0].click();", close_btn)
+
+                for _ in range(15):
+                    if not self.is_running:
+                        break
+                    time.sleep(0.2)
+                    try:
+                        modal_body = self.driver.find_element(By.ID, "smallBody")
+                        content = modal_body.get_attribute("innerHTML") or ""
+                        if "429" in content or "Too Many Requests" in content:
+                            self.log("⚠️ Terdeteksi HTTP 429 pada modal. Cooldown 15 detik...")
+                            time.sleep(15)
+                            break
+                        if len(content.strip()) > 50:
+                            detail_html = content
+                            break
+                    except Exception:
+                        pass
+
+                try:
+                    close_btn = self.driver.find_element(By.CSS_SELECTOR, "#smallModal .close, #smallModal button[data-bs-dismiss='modal'], #smallModal button[data-dismiss='modal']")
+                    self.driver.execute_script("arguments[0].click();", close_btn)
+                except Exception:
+                    pass
             except Exception as e:
                 self.log(f"Gagal fetch detail via modal: {e}")
+
+        # Pastikan buffer modal dibersihkan kembali
+        try:
+            self.driver.execute_script("if (typeof $ !== 'undefined' && $('#smallBody').length) { $('#smallBody').empty(); }")
+        except Exception:
+            pass
 
         return detail_html
 
@@ -356,9 +412,12 @@ class LPJKScraper:
                     }
 
                     if fetch_details:
-                        detail_html = self._fetch_row_detail(tds)
+                        detail_html = self._fetch_row_detail(tds, company_name=nama_bu)
                         if detail_html:
                             contact = extract_contact_info(detail_html)
+
+                        # Jeda dinamis 1.5 - 2.5 detik per baris untuk mencegah pemicu HTTP 429
+                        time.sleep(random.uniform(1.5, 2.5))
 
                     item = {
                         "no": global_no,

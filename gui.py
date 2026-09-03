@@ -9,7 +9,7 @@ import customtkinter as ctk
 from scraper import LPJKScraper, PROVINSI_LIST, fetch_kabupaten
 from export import export_to_excel, export_to_csv, export_to_json
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")

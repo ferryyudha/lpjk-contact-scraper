@@ -6,6 +6,13 @@ Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-03
+
+### Fixed
+- Pencegahan error HTTP 429 (Too Many Requests) dari server LPJK dengan menambahkan delay cerdas (1.5 - 2.5 detik) antar baris data dan pembatasan pagination menjadi 25 baris per halaman.
+- Penanganan auto-cooldown dan retry otomatis ketika server LPJK merespons status 429.
+- Pembersihan buffer modal DOM (`#smallBody`) sebelum dan sesudah request detail untuk mencegah duplikasi data kontak perusahaan sebelumnya ke perusahaan baru.
+
 ## [1.0.0] - 2026-09-03
 
 ### Added
