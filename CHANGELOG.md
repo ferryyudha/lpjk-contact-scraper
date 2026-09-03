@@ -13,6 +13,7 @@ Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.0.0/).
 - Penanganan auto-cooldown dan retry otomatis ketika server LPJK merespons status 429.
 - Pembersihan buffer modal DOM (`#smallBody`) sebelum dan sesudah request detail untuk mencegah duplikasi data kontak perusahaan sebelumnya ke perusahaan baru.
 - Perbaikan `ImportError: cannot import name 'export_to_json' from 'export'` pada `gui.py` yang menyebabkan file `.exe` gagal dibuka (*crash* saat *startup*).
+- Perbaikan bundel PyInstaller pada file `.exe` agar menyertakan seluruh submodul driver Selenium (Chrome & Edge) dan executable pendukung `selenium-manager` sehingga browser dapat terbuka secara otomatis.
 
 ### Added
 - Penyediaan file executable standalone (`dist/LPJK_Contact_Scraper.exe`) yang siap dijalankan langsung di Windows tanpa memerlukan instalasi Python.
