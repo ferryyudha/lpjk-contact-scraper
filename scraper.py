@@ -370,7 +370,7 @@ class LPJKScraper:
         except Exception:
             pass
 
-        return detail_html
+        return detail_html, is_success
 
     def _extract_rows(self, fetch_details, total_records):
         global_no = len(self.results) + 1
@@ -411,8 +411,9 @@ class LPJKScraper:
                         "telepon": "", "alamat": "", "pimpinan": ""
                     }
 
+                    detail_success = False
                     if fetch_details:
-                        detail_html = self._fetch_row_detail(tds, company_name=nama_bu)
+                        detail_html, detail_success = self._fetch_row_detail(tds, company_name=nama_bu)
                         if detail_html:
                             contact = extract_contact_info(detail_html)
 
@@ -449,7 +450,16 @@ class LPJKScraper:
 
                     wa_log = contact["whatsapp"] or "-"
                     em_log = contact["email"] or "-"
-                    self.log(f"[{global_no - 1}] {nama_bu} | WA: {wa_log} | Email: {em_log}")
+
+                    if not fetch_details:
+                        self.log(f"[{global_no - 1}] {nama_bu}")
+                    elif contact["whatsapp"] or contact["email"] or contact["telepon"]:
+                        self.log(f"[{global_no - 1}] {nama_bu} | WA: {wa_log} | Email: {em_log}")
+                    elif detail_success:
+                        extra_alamat = f" (Alamat: {contact['alamat'][:35]}...)" if contact['alamat'] else ""
+                        self.log(f"[{global_no - 1}] {nama_bu} | Detail dimuat (Kontak tidak dicantumkan di LPJK){extra_alamat}")
+                    else:
+                        self.log(f"[{global_no - 1}] ⚠️ {nama_bu} | Gagal memuat detail (Server LPJK timeout/skip)")
 
                 except Exception as e:
                     self.log(f"Error parsing baris {row_idx + 1}: {e}")
