@@ -11,14 +11,13 @@ Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.0.0/).
 ### Added
 - **Auto-retry 2x** per baris saat fetch detail gagal, dengan cooldown 5–10 detik sebelum mencoba ulang.
 - **Second Pass otomatis**: setelah seluruh halaman selesai diproses, baris yang masih ter-skip otomatis diproses ulang via AJAX langsung, dan kolom kontak di tabel GUI langsung terupdate tanpa perlu scraping ulang dari awal.
+- Kolom ekspor disederhanakan: hanya menyimpan **No, Nama Badan Usaha, WhatsApp, Link WhatsApp, Email, Provinsi, Kabupaten/Kota** — menghapus kolom Telepon Kantor, Pimpinan/PJBU, NPWP, Kualifikasi, Alamat Lengkap, dan Status/Subklasifikasi.
 
 ## [1.0.3] - 2026-09-03
 
 ### Added
 - Transparansi status log detail pada GUI: membedakan secara tegas antara data kontak yang memang tidak dicantumkan oleh perusahaan di LPJK vs request detail yang mengalami timeout/kegagalan server.
 - Indikator cuplikan alamat pada log saat kontak tidak tercantum untuk membuktikan bahwa halaman detail berhasil ditarik dari LPJK.
-- **Auto-retry 2x** per baris saat fetch detail gagal, dengan cooldown 5–10 detik sebelum mencoba ulang.
-- **Second Pass otomatis**: setelah seluruh halaman selesai diproses, baris yang masih ter-skip otomatis diproses ulang, dan kolom kontak di tabel GUI langsung terupdate tanpa perlu scraping ulang dari awal.
 
 ## [1.0.2] - 2026-09-03
 

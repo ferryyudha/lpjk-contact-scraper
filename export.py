@@ -8,9 +8,7 @@ from openpyxl.utils import get_column_letter
 
 EXCEL_HEADERS = [
     "No", "Nama Badan Usaha", "WhatsApp (62...)", "Link WhatsApp",
-    "Email Perusahaan", "No Telepon Kantor", "Pimpinan / PJBU",
-    "Provinsi", "Kabupaten / Kota", "NPWP", "Kualifikasi",
-    "Alamat Lengkap", "Status / Subklasifikasi"
+    "Email Perusahaan", "Provinsi", "Kabupaten / Kota"
 ]
 
 HEADER_FONT = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
@@ -23,7 +21,7 @@ THIN_BORDER = Border(
     top=Side(style="thin", color="D9D9D9"),
     bottom=Side(style="thin", color="D9D9D9"),
 )
-CENTER_COLS = {1, 3, 4, 8, 9, 10, 11}
+CENTER_COLS = {1, 3, 4, 6, 7}
 
 
 def clean_whatsapp(number_str):
@@ -65,14 +63,8 @@ def export_to_excel(data_list, output_path):
             wa_num,
             "Chat WA" if wa_link else "-",
             item.get("email", ""),
-            item.get("telepon", ""),
-            item.get("pimpinan", ""),
             item.get("provinsi", ""),
             item.get("kabupaten", ""),
-            item.get("npwp", ""),
-            item.get("kualifikasi", ""),
-            item.get("alamat", ""),
-            item.get("subklas", ""),
         ])
 
         for col_idx in range(1, len(EXCEL_HEADERS) + 1):
@@ -103,7 +95,9 @@ def export_to_excel(data_list, output_path):
 
 
 def export_to_csv(data_list, output_path):
-    pd.DataFrame(data_list).to_csv(output_path, index=False, encoding="utf-8-sig")
+    csv_fields = ["no", "nama", "whatsapp", "wa_link", "email", "provinsi", "kabupaten"]
+    rows = [{k: item.get(k, "") for k in csv_fields} for item in data_list]
+    pd.DataFrame(rows, columns=csv_fields).to_csv(output_path, index=False, encoding="utf-8-sig")
     return output_path
 
 
