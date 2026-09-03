@@ -6,17 +6,21 @@ Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-09-03
+
+### Fixed
+- Perbaikan `ImportError: cannot import name 'export_to_json' from 'export'` pada `gui.py` yang menyebabkan file `.exe` gagal dibuka (*crash* saat *startup*).
+- Perbaikan bundel PyInstaller pada file `.exe` agar menyertakan seluruh submodul driver Selenium (Chrome & Edge) dan binary pendukung `selenium-manager` sehingga browser dapat terbuka secara otomatis tanpa pesan "Chrome tidak tersedia / Gagal membuka browser".
+
+### Added
+- Pembaruan file executable standalone (`dist/LPJK_Contact_Scraper.exe`) v1.0.2 siap pakai tanpa instalasi Python.
+
 ## [1.0.1] - 2026-09-03
 
 ### Fixed
 - Pencegahan error HTTP 429 (Too Many Requests) dari server LPJK dengan menambahkan delay cerdas (1.5 - 2.5 detik) antar baris data dan pembatasan pagination menjadi 25 baris per halaman.
 - Penanganan auto-cooldown dan retry otomatis ketika server LPJK merespons status 429.
 - Pembersihan buffer modal DOM (`#smallBody`) sebelum dan sesudah request detail untuk mencegah duplikasi data kontak perusahaan sebelumnya ke perusahaan baru.
-- Perbaikan `ImportError: cannot import name 'export_to_json' from 'export'` pada `gui.py` yang menyebabkan file `.exe` gagal dibuka (*crash* saat *startup*).
-- Perbaikan bundel PyInstaller pada file `.exe` agar menyertakan seluruh submodul driver Selenium (Chrome & Edge) dan executable pendukung `selenium-manager` sehingga browser dapat terbuka secara otomatis.
-
-### Added
-- Penyediaan file executable standalone (`dist/LPJK_Contact_Scraper.exe`) yang siap dijalankan langsung di Windows tanpa memerlukan instalasi Python.
 
 ## [1.0.0] - 2026-09-03
 
