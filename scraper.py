@@ -289,6 +289,7 @@ class LPJKScraper:
                 pass
 
         detail_html = ""
+        is_success = False
 
         # 1. Bersihkan buffer modal terlebih dahulu agar data perusahaan sebelumnya tidak tertinggal
         try:
@@ -300,7 +301,7 @@ class LPJKScraper:
             max_retries = 3
             for attempt in range(max_retries):
                 if not self.is_running:
-                    return ""
+                    return "", False
                 try:
                     script = f"""
                     var done = arguments[arguments.length - 1];
@@ -321,11 +322,12 @@ class LPJKScraper:
                         self.log(f"⚠️ Server LPJK limit (HTTP 429). Cooldown {wait_sec} detik sebelum retry...")
                         for _ in range(wait_sec):
                             if not self.is_running:
-                                return ""
+                                return "", False
                             time.sleep(1)
                         continue
                     elif status == 200 and html_content:
                         detail_html = html_content
+                        is_success = True
                         break
                     else:
                         break
@@ -352,6 +354,7 @@ class LPJKScraper:
                             break
                         if len(content.strip()) > 50:
                             detail_html = content
+                            is_success = True
                             break
                     except Exception:
                         pass
