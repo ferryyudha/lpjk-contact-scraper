@@ -108,3 +108,44 @@ Agar Selenium dan WebDriver dapat berjalan mulus di komputer user tanpa Python:
 - `LPJK_Contact_Scraper.spec` menggunakan `collect_all('selenium')` dan `collect_all('webdriver_manager')`.
 - Menjamin modul subpackage dynamic import dan binary `selenium-manager.exe` disertakan ke dalam bundel `.exe`.
 
+---
+
+## Arsitektur Scraping Serentak (Staggered Concurrency) & Pencegahan HTTP 429
+
+Sebelumnya, pengambilan detail kontak dilakukan murni serial baris demi baris, yang memakan waktu lama dan rentan terkena blokir HTTP 429 saat frekuensi tidak terkendali.
+
+Pada arsitektur baru:
+1. **Pemisahan Tampilan & Pengambilan Detail**:
+   - Seluruh baris di halaman aktif (25 baris) langsung diekstrak kolom dasarnya (Nama BU, NPWP, Provinsi, Kabupaten) dan dimasukkan ke tabel GUI seketika. Pengguna langsung melihat daftar perusahaan tanpa menunggu.
+2. **Batch Asynchronous dengan Staggered Offset**:
+   - Baris diproses dalam batch kecil (`BATCH_SIZE = 3`).
+   - Request tidak dikirim serentak di milidetik yang sama (yang dapat memicu lonjakan/burst rate limiter Nginx).
+   - Menggunakan `Promise.all` dan `setTimeout` di JavaScript browser:
+     - Request 1: $t = 0.0$ detik
+     - Request 2: $t = 1.5$ detik
+     - Request 3: $t = 3.0$ detik
+   - Memberikan jeda antar-batch sebesar `4.0 - 5.5` detik (`BATCH_INTERVAL_MIN` dan `BATCH_INTERVAL_MAX`).
+3. **Pencegahan HTTP 429 Terpusat (Global Circuit Breaker)**:
+   - Jika salah satu response dalam batch menghasilkan status HTTP 429, sistem langsung mengaktifkan jeda cooldown 40 detik (`HTTP_429_COOLDOWN`).
+   - Batch yang gagal akan otomatis dicoba kembali setelah cooldown selesai.
+4. **Micro-Break Antar Halaman (10–12 detik)**:
+   - Sebelum berpindah ke halaman berikutnya (`TABLE_1_next`), diberikan jeda istirahat 10–12 detik (`PAGE_COOLDOWN_MIN` - `PAGE_COOLDOWN_MAX`).
+   - Jeda ini mereset token bucket Nginx pada server LPJK sehingga kuota request per IP kembali segar.
+
+---
+
+## Mekanisme Anti-Crash di Ratusan Data (Robust Pagination & Memory Stability)
+
+Saat scraping mencapai ratusan hingga ribuan baris, sering timbul masalah server LPJK melambat merespons pagination (`OFFSET` database backend besar) atau browser renderer kehabisan memori:
+
+1. **Smart Page Transition Waiter (`_wait_for_new_page`)**:
+   - Menghindari pembacaan tabel yang masih bertuliskan "Loading..." atau "Processing...".
+   - Memastikan baris pertama halaman baru benar-benar berbeda dari baris pertama halaman sebelumnya sebelum mulai mengekstrak data.
+2. **Retry Navigasi 3x (`_navigate_to_next_page`)**:
+   - Jika tombol Next mengalami `StaleElementReferenceException` atau terhalang sementara, scraper tidak langsung berhenti (`break`), melainkan mencoba kembali hingga 3 kali dengan jeda pemulihan 3 detik.
+   - Scraper hanya mengakhiri loop jika tombol Next terkonfirmasi memiliki atribut `disabled` (halaman terakhir).
+3. **Penanganan Timeout Eksekusi Script**:
+   - Jika server LPJK mengalami transient network hang saat eksekusi batch AJAX, sistem menangkap timeout secara elegan, memberi cooldown 10 detik, dan mencoba kembali batch tersebut tanpa membuat aplikasi crash.
+4. **Argumen Stabilitas Memori Chromium**:
+   - Menambahkan `--disable-dev-shm-usage`, `--disable-features=Translate,OptimizationHints`, serta timeout driver eksplisit (`set_script_timeout(35)` dan `set_page_load_timeout(60)`) agar browser stabil berjalan berjam-jam.
+

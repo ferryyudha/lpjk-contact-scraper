@@ -11,8 +11,10 @@ Data bersumber dari halaman detail tiap perusahaan yang diambil secara aman via 
 
 - **Pencarian Fleksibel**: Filter berdasarkan nama badan usaha, NPWP, provinsi, kabupaten/kota, dan kualifikasi usaha.
 - **Ekstraksi Kontak Akurat**: Mendeteksi nomor WhatsApp valid (operator seluler Indonesia 08xx/628xx), generate link `https://wa.me/...`, dan alamat email resmi perusahaan.
-- **Anti-Rate Limit (HTTP 429)**: Delay adaptif (1.5 - 2.5 detik) serta auto-cooldown backoff otomatis jika server LPJK sibuk.
-- **In-Place Auto-Retry (2x)**: Otomatis mencoba ulang hingga 2 kali saat koneksi detail timeout/gagal sebelum menandai data.
+- **Scraping Serentak Bertingkat (Staggered Concurrency)**: Memproses pengambilan detail dalam batch (3 perusahaan) dengan jeda bertingkat (0s, 1.5s, 3.0s) dan interval acak 4.0–5.5 detik untuk kecepatan 2x–3x lebih cepat tanpa memicu burst request.
+- **Anti-Rate Limit (HTTP 429)**: Global Circuit Breaker yang otomatis menghentikan antrean selama 40 detik jika server LPJK memberi peringatan rate-limit, lalu melanjutkan scraping secara aman.
+- **Anti-Crash di Ratusan Data**: Smart Page Waiter untuk mendeteksi render DataTables dan retry navigasi 3 kali agar tidak berhenti mendadak saat server lambat di halaman tinggi.
+- **Micro-Break Antar Halaman**: Jeda istirahat 10–12 detik antar-halaman untuk me-reset token bucket rate limiter Nginx server LPJK.
 - **Second Pass Recovery**: Memproses ulang baris yang ter-skip di akhir sesi secara otomatis dan langsung memperbarui tampilan tabel.
 - **Kolom Ekspor Ringkas & Relevan**: Hasil ekspor Excel (.xlsx) dan CSV (.csv) dirancang fokus untuk telemarketing/kontak:
   1. `No`
@@ -23,7 +25,7 @@ Data bersumber dari halaman detail tiap perusahaan yang diambil secara aman via 
   6. `Provinsi`
   7. `Kabupaten / Kota`
 - **Auto-Save Berkala**: Otomatis menyimpan progres setiap 50 data ke folder `hasil_scraping`.
-- **Standalone Executable (.exe)**: Dapat dijalankan langsung tanpa perlu install Python.
+- **Standalone Executable (.exe)**: Dapat dijalankan langsung tanpa perlu install Python (v1.0.5).
 
 ---
 

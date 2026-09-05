@@ -6,6 +6,16 @@ Format mengikuti [Keep a Changelog](https://keepachangelog.com/id/1.0.0/).
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-09-05
+
+### Added
+- **Scraping Serentak Bertingkat (Staggered Batch Concurrency)**: Pengambilan detail kontak dilakukan secara paralel per batch (3 perusahaan) dengan jeda bertingkat (0s, 1.5s, 3.0s) dan interval acak 4.0–5.5 detik untuk kecepatan 2x–3x lebih cepat tanpa memicu burst request.
+- **Tampilan Instan di GUI**: Seluruh baris di halaman aktif (25 data) langsung dimunculkan ke tabel antarmuka sebelum pengambilan detail dimulai, dan kontak di-update secara real-time.
+- **Global Circuit Breaker (HTTP 429)**: Otomatis mendeteksi batas rate-limit server LPJK dan melakukan pause terpusat selama 40 detik dengan hitungan mundur sebelum melanjutkan antrean.
+- **Micro-Break Antar Halaman**: Istirahat berkala 10–12 detik setiap pergantian halaman untuk me-reset token bucket rate limiter Nginx server LPJK.
+- **Anti-Crash di Ratusan Data (Smart Page Waiter & Retry 3x)**: Menunggu aktif hingga DataTables selesai merender halaman baru dan mencoba ulang navigasi hingga 3 kali jika server melambat di halaman tinggi (`OFFSET 500+`).
+- **Pencegahan Memory Leak**: Penambahan flag Chromium `--disable-dev-shm-usage` dan timeout eksplisit agar browser stabil berjalan berjam-jam tanpa crash renderer.
+
 ## [1.0.4] - 2026-09-03
 
 ### Added

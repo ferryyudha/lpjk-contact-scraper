@@ -16,6 +16,15 @@ KABUPATEN_API = "https://lpjk.pu.go.id/laporan-lpjk/kabupaten/{}"
 AUTOSAVE_INTERVAL = 50
 MAX_WAIT_SECONDS = 240
 
+# Konfigurasi Concurrency (Serentak) & Anti-Rate Limit (HTTP 429)
+BATCH_SIZE = 3               # Jumlah request detail serentak per batch (2-3)
+BATCH_STAGGER_MS = 1500      # Jeda antar request dalam 1 batch (1.5 dtk) untuk mencegah burst spike
+BATCH_INTERVAL_MIN = 4.0     # Jeda minimum antar batch (4.0 detik)
+BATCH_INTERVAL_MAX = 5.5     # Jeda maksimum antar batch (5.5 detik)
+PAGE_COOLDOWN_MIN = 10.0     # Micro-break jeda antar halaman (10 detik) untuk reset token bucket Nginx
+PAGE_COOLDOWN_MAX = 12.0     # Micro-break jeda antar halaman (12 detik)
+HTTP_429_COOLDOWN = 40       # Global pause (detik) saat server LPJK merespons 429
+
 # Prefix operator seluler Indonesia yang valid (per 2024)
 # Sengaja tidak pakai \d+ generik supaya nomor resi/sertifikat SBU tidak ikut tertangkap
 MOBILE_PATTERN = r'(?:\+?62|0)8(?:1[1-9]|2[1-3]|3[1-38]|5[1-35-9]|7[78]|8[1-9]|9[5-9])[0-9\s\-]{6,9}[0-9]'
@@ -152,9 +161,15 @@ class LPJKScraper:
                 opts.add_argument("--headless=new")
             opts.add_argument("--disable-gpu")
             opts.add_argument("--no-sandbox")
+            opts.add_argument("--disable-dev-shm-usage")
+            opts.add_argument("--disable-features=Translate,OptimizationHints")
+            opts.add_argument("--no-default-browser-check")
+            opts.add_argument("--no-first-run")
             opts.add_argument("--disable-blink-features=AutomationControlled")
             opts.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             self.driver = webdriver.Chrome(options=opts)
+            self.driver.set_script_timeout(35)
+            self.driver.set_page_load_timeout(60)
             self.log("Browser Google Chrome berhasil dibuka.")
             return True
         except Exception as e_chrome:
@@ -165,7 +180,13 @@ class LPJKScraper:
                     e_opts.add_argument("--headless=new")
                 e_opts.add_argument("--disable-gpu")
                 e_opts.add_argument("--no-sandbox")
+                e_opts.add_argument("--disable-dev-shm-usage")
+                e_opts.add_argument("--disable-features=Translate,OptimizationHints")
+                e_opts.add_argument("--no-default-browser-check")
+                e_opts.add_argument("--no-first-run")
                 self.driver = webdriver.Edge(options=e_opts)
+                self.driver.set_script_timeout(35)
+                self.driver.set_page_load_timeout(60)
                 self.log("Browser Microsoft Edge berhasil dibuka.")
                 return True
             except Exception as e_edge:
@@ -281,113 +302,307 @@ class LPJKScraper:
             self.log(f"Gagal membaca total data: {e}")
         return 0
 
-    def _fetch_row_detail(self, tds, company_name=""):
-        detail_href = ""
-        detail_btn = None
-        if len(tds) >= 6:
+    def _sleep_with_cancel(self, seconds):
+        steps = int(seconds * 10)
+        for _ in range(steps):
+            if not self.is_running:
+                return False
+            time.sleep(0.1)
+        return True
+
+    def _wait_for_new_page(self, previous_first_text="", max_wait=20):
+        """
+        Menunggu secara aktif hingga DataTables selesai merender baris-baris halaman baru.
+        Mencegah pembacaan data kosong atau stale element saat server LPJK merespons lambat.
+        """
+        start = time.time()
+        while self.is_running and (time.time() - start < max_wait):
             try:
-                detail_btn = tds[5].find_element(By.CSS_SELECTOR, "#smallButton, a[data-attr]")
-                detail_href = detail_btn.get_attribute("data-attr") or ""
+                # 1. Cek indikator processing DataTables
+                processing_els = self.driver.find_elements(By.CSS_SELECTOR, ".dataTables_processing")
+                if processing_els and processing_els[0].is_displayed():
+                    time.sleep(0.4)
+                    continue
+
+                # 2. Cek baris tabel
+                rows = self.driver.find_elements(By.CSS_SELECTOR, "#TABLE_1 tbody tr")
+                if rows:
+                    first_text = rows[0].text.strip()
+                    if "Loading" in first_text or "Processing" in first_text:
+                        time.sleep(0.4)
+                        continue
+                    if "No matching records found" in first_text or "No data available" in first_text:
+                        return False, []
+
+                    tds = rows[0].find_elements(By.TAG_NAME, "td")
+                    if len(tds) >= 5:
+                        # Jika ada teks pembanding baris pertama halaman sebelumnya, pastikan sudah berubah
+                        if not previous_first_text or first_text != previous_first_text:
+                            return True, rows
             except Exception:
                 pass
+            time.sleep(0.4)
 
-        detail_html = ""
-        is_success = False
-
-        # 1. Bersihkan buffer modal terlebih dahulu agar data perusahaan sebelumnya tidak tertinggal
+        # Jika waktu tunggu habis, kembalikan baris apa adanya jika valid
         try:
-            self.driver.execute_script("if (typeof $ !== 'undefined' && $('#smallBody').length) { $('#smallBody').empty(); }")
+            fallback_rows = self.driver.find_elements(By.CSS_SELECTOR, "#TABLE_1 tbody tr")
+            if fallback_rows and len(fallback_rows[0].find_elements(By.TAG_NAME, "td")) >= 5:
+                return True, fallback_rows
+        except Exception:
+            pass
+        return False, []
+
+    def _navigate_to_next_page(self, current_page, previous_first_text):
+        """
+        Navigasi ke halaman berikutnya dengan proteksi retry 3x, verifikasi rendering aktif,
+        dan penanganan aman agar scraper tidak berhenti tiba-tiba di ratusan data.
+        """
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            if not self.is_running:
+                return "stopped"
+
+            try:
+                next_btns = self.driver.find_elements(By.ID, "TABLE_1_next")
+                if not next_btns:
+                    self.log(f"⚠️ Tombol Next tidak terdeteksi (percobaan {attempt}/{max_retries}). Menunggu...")
+                    self._sleep_with_cancel(3)
+                    continue
+
+                next_btn = next_btns[0]
+                btn_class = next_btn.get_attribute("class") or ""
+                if "disabled" in btn_class:
+                    self.log("Halaman terakhir tercapai (tombol Next disabled).")
+                    return "last_page"
+
+                # Cari elemen tautan <a> di dalam tombol Next
+                link_els = next_btn.find_elements(By.TAG_NAME, "a")
+                target_btn = link_els[0] if link_els else next_btn
+
+                # Klik dengan execute_script agar terbebas dari halangan elemen overlay
+                self.driver.execute_script("arguments[0].click();", target_btn)
+
+                # Tunggu secara aktif hingga baris halaman baru benar-benar muncul
+                loaded, _ = self._wait_for_new_page(previous_first_text=previous_first_text, max_wait=15)
+                if loaded:
+                    return "success"
+
+                self.log(f"⏳ Halaman {current_page + 1} belum selesai memuat (percobaan {attempt}/{max_retries}). Menunggu...")
+                self._sleep_with_cancel(3)
+
+            except Exception as e:
+                self.log(f"⚠️ Kendala navigasi ke halaman {current_page + 1} (percobaan {attempt}/{max_retries}): {e}")
+                self._sleep_with_cancel(3)
+
+        # Verifikasi terakhir apakah tombol Next memang sudah disabled
+        try:
+            next_btns = self.driver.find_elements(By.ID, "TABLE_1_next")
+            if next_btns and "disabled" in (next_btns[0].get_attribute("class") or ""):
+                self.log("Halaman terakhir terkonfirmasi.")
+                return "last_page"
         except Exception:
             pass
 
-        if detail_href:
-            max_retries = 3
-            for attempt in range(max_retries):
+        self.log(f"❌ Navigasi ke halaman {current_page + 1} gagal setelah {max_retries} kali percobaan.")
+        return "failed"
+
+    def _fallback_modal_single(self, detail_btn):
+        """Fallback mengambil modal jika AJAX tidak berhasil."""
+        if not detail_btn:
+            return ""
+        detail_html = ""
+        try:
+            self.driver.execute_script("if (typeof $ !== 'undefined' && $('#smallBody').length) { $('#smallBody').empty(); }")
+            self.driver.execute_script("arguments[0].click();", detail_btn)
+
+            for _ in range(15):
                 if not self.is_running:
-                    return "", False
-                try:
-                    script = f"""
-                    var done = arguments[arguments.length - 1];
-                    $.ajax({{
-                        url: '{detail_href}',
-                        type: 'GET',
-                        timeout: 10000,
-                        success: function(data) {{ done({{ status: 200, html: data }}); }},
-                        error: function(xhr) {{ done({{ status: xhr.status || 0, html: '' }}); }}
-                    }});
-                    """
-                    res = self.driver.execute_async_script(script)
-                    status = res.get("status", 0) if isinstance(res, dict) else 200
-                    html_content = res.get("html", "") if isinstance(res, dict) else (res or "")
-
-                    if status == 429:
-                        wait_sec = 15 * (attempt + 1)
-                        self.log(f"⚠️ Server LPJK limit (HTTP 429). Cooldown {wait_sec} detik sebelum retry...")
-                        for _ in range(wait_sec):
-                            if not self.is_running:
-                                return "", False
-                            time.sleep(1)
-                        continue
-                    elif status == 200 and html_content:
-                        detail_html = html_content
-                        is_success = True
-                        break
-                    else:
-                        break
-                except Exception as e:
-                    self.log(f"Gagal fetch detail via AJAX: {e}")
                     break
-
-        # 2. Fallback modal jika AJAX tidak berhasil
-        if not detail_html and detail_btn:
-            try:
-                self.driver.execute_script("if (typeof $ !== 'undefined' && $('#smallBody').length) { $('#smallBody').empty(); }")
-                self.driver.execute_script("arguments[0].click();", detail_btn)
-
-                for _ in range(15):
-                    if not self.is_running:
-                        break
-                    time.sleep(0.2)
-                    try:
-                        modal_body = self.driver.find_element(By.ID, "smallBody")
-                        content = modal_body.get_attribute("innerHTML") or ""
-                        if "429" in content or "Too Many Requests" in content:
-                            self.log("⚠️ Terdeteksi HTTP 429 pada modal. Cooldown 15 detik...")
-                            time.sleep(15)
-                            break
-                        if len(content.strip()) > 50:
-                            detail_html = content
-                            is_success = True
-                            break
-                    except Exception:
-                        pass
-
+                time.sleep(0.2)
                 try:
-                    close_btn = self.driver.find_element(By.CSS_SELECTOR, "#smallModal .close, #smallModal button[data-bs-dismiss='modal'], #smallModal button[data-dismiss='modal']")
-                    self.driver.execute_script("arguments[0].click();", close_btn)
+                    modal_body = self.driver.find_element(By.ID, "smallBody")
+                    content = modal_body.get_attribute("innerHTML") or ""
+                    if "429" in content or "Too Many Requests" in content:
+                        self.log("⚠️ Terdeteksi HTTP 429 pada modal. Cooldown 20 detik...")
+                        self._sleep_with_cancel(20)
+                        break
+                    if len(content.strip()) > 50:
+                        detail_html = content
+                        break
                 except Exception:
                     pass
-            except Exception as e:
-                self.log(f"Gagal fetch detail via modal: {e}")
 
-        # Pastikan buffer modal dibersihkan kembali
+            try:
+                close_btn = self.driver.find_element(By.CSS_SELECTOR, "#smallModal .close, #smallModal button[data-bs-dismiss='modal'], #smallModal button[data-dismiss='modal']")
+                self.driver.execute_script("arguments[0].click();", close_btn)
+            except Exception:
+                pass
+        except Exception as e:
+            self.log(f"Gagal fetch detail via modal fallback: {e}")
+
         try:
             self.driver.execute_script("if (typeof $ !== 'undefined' && $('#smallBody').length) { $('#smallBody').empty(); }")
         except Exception:
             pass
 
-        return detail_html, is_success
+        return detail_html
+
+    def _fetch_batch_details(self, batch):
+        """
+        Mengambil detail kontak untuk sekelompok (batch 2-3) baris secara serentak
+        dengan jeda bertingkat (staggered delay) untuk mencegah lonjakan request dan HTTP 429.
+        """
+        if not batch or not self.is_running:
+            return
+
+        # 1. Bersihkan buffer modal
+        try:
+            self.driver.execute_script("if (typeof $ !== 'undefined' && $('#smallBody').length) { $('#smallBody').empty(); }")
+        except Exception:
+            pass
+
+        # 2. Siapkan payload request dengan staggered delay (offset)
+        tasks_payload = []
+        for i, entry in enumerate(batch):
+            href = entry.get("detail_href")
+            if href:
+                tasks_payload.append({
+                    "batch_idx": i,
+                    "url": href,
+                    "delay": i * BATCH_STAGGER_MS
+                })
+
+        batch_results = {}
+        max_retries = 2
+
+        for attempt in range(max_retries + 1):
+            if not self.is_running or not tasks_payload:
+                break
+
+            try:
+                script = """
+                var done = arguments[arguments.length - 1];
+                var tasks = arguments[0];
+                if (typeof $ === 'undefined' || typeof $.ajax === 'undefined') {
+                    done([]);
+                    return;
+                }
+                var promises = tasks.map(function(t) {
+                    return new Promise(function(resolve) {
+                        setTimeout(function() {
+                            $.ajax({
+                                url: t.url,
+                                type: 'GET',
+                                timeout: 12000,
+                                success: function(data) { resolve({ batch_idx: t.batch_idx, status: 200, html: data }); },
+                                error: function(xhr) { resolve({ batch_idx: t.batch_idx, status: xhr.status || 0, html: '' }); }
+                            });
+                        }, t.delay);
+                    });
+                });
+                Promise.all(promises).then(function(results) {
+                    done(results);
+                });
+                """
+                res = self.driver.execute_async_script(script, tasks_payload)
+                if not isinstance(res, list):
+                    res = []
+
+                is_429 = any(r.get("status") == 429 for r in res)
+
+                if is_429:
+                    cooldown = HTTP_429_COOLDOWN * (attempt + 1)
+                    self.log(f"⚠️ Server LPJK limit (HTTP 429). Mengaktifkan Global Pause selama {cooldown} detik...")
+                    for remaining in range(cooldown, 0, -1):
+                        if not self.is_running:
+                            return
+                        if remaining % 10 == 0 or remaining <= 5:
+                            self.log(f"⏳ Cooldown 429: sisa {remaining} detik...")
+                        time.sleep(1)
+                    continue  # Coba lagi batch yang sama
+
+                # Catat hasil yang sukses
+                for r in res:
+                    idx = r.get("batch_idx")
+                    status = r.get("status", 0)
+                    html = r.get("html", "")
+                    if status == 200 and html and len(html.strip()) > 50:
+                        batch_results[idx] = html
+
+                # Jika semua yang punya URL sudah berhasil, selesai
+                needed_indices = {t["batch_idx"] for t in tasks_payload}
+                if needed_indices.issubset(batch_results.keys()):
+                    break
+
+                # Jika ada yang gagal dan bukan 429, retry yang belum berhasil saja
+                missing_indices = needed_indices - batch_results.keys()
+                if attempt < max_retries and missing_indices:
+                    cooldown_retry = 5 * (attempt + 1)
+                    self.log(f"↩️ Retry {len(missing_indices)} detail yang belum terambil dalam {cooldown_retry} detik...")
+                    if not self._sleep_with_cancel(cooldown_retry):
+                        return
+                    tasks_payload = [t for t in tasks_payload if t["batch_idx"] in missing_indices]
+                else:
+                    break
+
+            except Exception as e:
+                err_str = str(e).lower()
+                if "timeout" in err_str:
+                    self.log(f"⚠️ Server LPJK lambat/timeout sesaat ({e}). Cooldown 10 detik sebelum coba lagi...")
+                    if not self._sleep_with_cancel(10):
+                        return
+                    continue
+                self.log(f"Gagal execute batch AJAX: {e}")
+                break
+
+        # 3. Proses hasil untuk setiap item di dalam batch
+        for i, entry in enumerate(batch):
+            if not self.is_running:
+                break
+
+            item = entry["item"]
+            detail_btn = entry.get("detail_btn")
+            nama_bu = item["nama"]
+            html_content = batch_results.get(i, "")
+
+            # Fallback ke modal jika AJAX tidak membuahkan hasil
+            if not html_content and detail_btn:
+                self.log(f"  Mencoba fallback modal untuk '{nama_bu}'...")
+                html_content = self._fallback_modal_single(detail_btn)
+
+            if html_content:
+                contact = extract_contact_info(html_content)
+                item.update({
+                    "whatsapp": contact["whatsapp"],
+                    "wa_link": contact["wa_link"],
+                    "email": contact["email"],
+                    "telepon": contact["telepon"],
+                    "pimpinan": contact["pimpinan"],
+                    "alamat": contact["alamat"],
+                })
+                self.update_row_callback(item)
+
+                wa_log = contact["whatsapp"] or "-"
+                em_log = contact["email"] or "-"
+                if contact["whatsapp"] or contact["email"] or contact["telepon"]:
+                    self.log(f"[{item['no']}] {nama_bu} | WA: {wa_log} | Email: {em_log}")
+                else:
+                    extra_alamat = f" (Alamat: {contact['alamat'][:35]}...)" if contact['alamat'] else ""
+                    self.log(f"[{item['no']}] {nama_bu} | Detail dimuat (Kontak tidak dicantumkan di LPJK){extra_alamat}")
+            else:
+                self.skipped_items.append({"item": item, "tds_idx": item["no"] - 1})
+                self.log(f"[{item['no']}] ⚠️ {nama_bu} | Gagal memuat detail — ditandai untuk second pass")
 
     def _extract_rows(self, fetch_details, total_records):
         global_no = len(self.results) + 1
-        total_wa = sum(1 for r in self.results if r.get("whatsapp"))
-        total_email = sum(1 for r in self.results if r.get("email"))
         current_page = 1
         is_unlimited = total_records <= 0
-
         total_display = f"/{total_records:,}" if total_records else ""
 
         while self.is_running:
+            total_wa = sum(1 for r in self.results if r.get("whatsapp"))
+            total_email = sum(1 for r in self.results if r.get("email"))
+
             self.log(f"--- Halaman {current_page} (dikumpulkan: {len(self.results)}{total_display}) ---")
             prog = 0.5 if is_unlimited else min(0.15 + (current_page / max(current_page + 5, 1)) * 0.8, 0.95)
             self.status_callback(
@@ -396,9 +611,18 @@ class LPJKScraper:
                 {"total": len(self.results), "wa": total_wa, "email": total_email}
             )
 
-            rows = self.driver.find_elements(By.CSS_SELECTOR, "#TABLE_1 tbody tr")
-            self.log(f"Ditemukan {len(rows)} baris di halaman {current_page}.")
+            # Tunggu secara aktif hingga baris halaman ter-render (menghindari tabel blank/processing)
+            loaded, rows = self._wait_for_new_page(max_wait=15)
+            if not loaded or not rows:
+                self.log(f"Tidak ada data terdeteksi di halaman {current_page}.")
+                break
 
+            self.log(f"Ditemukan {len(rows)} baris di halaman {current_page}.")
+            current_first_text = rows[0].text.strip() if rows else ""
+
+            page_items = []
+
+            # 1. Ekstrak data dasar seluruh baris di halaman ini terlebih dahulu
             for row_idx, row in enumerate(rows):
                 if not self.is_running:
                     break
@@ -412,82 +636,81 @@ class LPJKScraper:
                     kab = tds[3].text.strip()
                     npwp_val = tds[4].text.strip()
 
-                    contact = {
-                        "email": "", "whatsapp": "", "wa_link": "",
-                        "telepon": "", "alamat": "", "pimpinan": ""
-                    }
-
-                    detail_success = False
-                    if fetch_details:
-                        # Percobaan pertama
-                        detail_html, detail_success = self._fetch_row_detail(tds, company_name=nama_bu)
-
-                        # Auto-retry 2x jika gagal (bukan karena user stop)
-                        if not detail_success and self.is_running:
-                            for retry_attempt in range(2):
-                                cooldown = 5 * (retry_attempt + 1)
-                                self.log(f"↩️ Retry {retry_attempt + 1}/2 untuk '{nama_bu}' dalam {cooldown} detik...")
-                                for _ in range(cooldown):
-                                    if not self.is_running:
-                                        break
-                                    time.sleep(1)
-                                if not self.is_running:
-                                    break
-                                detail_html, detail_success = self._fetch_row_detail(tds, company_name=nama_bu)
-                                if detail_success:
-                                    break
-
-                        if detail_html:
-                            contact = extract_contact_info(detail_html)
-
-                        # Jeda dinamis 1.5 - 2.5 detik per baris untuk mencegah pemicu HTTP 429
-                        time.sleep(random.uniform(1.5, 2.5))
+                    detail_href = ""
+                    detail_btn = None
+                    if len(tds) >= 6:
+                        try:
+                            detail_btn = tds[5].find_element(By.CSS_SELECTOR, "#smallButton, a[data-attr]")
+                            detail_href = detail_btn.get_attribute("data-attr") or ""
+                        except Exception:
+                            pass
 
                     item = {
                         "no": global_no,
                         "nama": nama_bu,
-                        "whatsapp": contact["whatsapp"],
-                        "wa_link": contact["wa_link"],
-                        "email": contact["email"],
-                        "telepon": contact["telepon"],
-                        "pimpinan": contact["pimpinan"],
+                        "whatsapp": "",
+                        "wa_link": "",
+                        "email": "",
+                        "telepon": "",
+                        "pimpinan": "",
                         "provinsi": prov,
                         "kabupaten": kab,
                         "npwp": npwp_val,
                         "kualifikasi": "-",
-                        "alamat": contact["alamat"],
+                        "alamat": "",
                         "subklas": ""
                     }
 
-                    if contact["whatsapp"]:
-                        total_wa += 1
-                    if contact["email"]:
-                        total_email += 1
-
                     self.results.append(item)
+                    # Tampilkan baris seketika ke tabel antarmuka GUI!
                     self.row_callback(item)
                     global_no += 1
+
+                    page_items.append({
+                        "item": item,
+                        "detail_href": detail_href,
+                        "detail_btn": detail_btn
+                    })
+
+                    if not fetch_details:
+                        self.log(f"[{item['no']}] {nama_bu}")
+
+                except Exception as e:
+                    self.log(f"Error parsing baris {row_idx + 1}: {e}")
+
+            # 2. Ambil detail secara serentak (paralel batch 2-3 baris) dengan jeda acak 4-5 detik
+            if fetch_details and page_items:
+                total_batches = (len(page_items) + BATCH_SIZE - 1) // BATCH_SIZE
+                for b_idx in range(total_batches):
+                    if not self.is_running:
+                        break
+
+                    b_start = b_idx * BATCH_SIZE
+                    batch = page_items[b_start:b_start + BATCH_SIZE]
+                    self.log(f"Memproses batch detail {b_idx + 1}/{total_batches} ({len(batch)} perusahaan serentak)...")
+
+                    self._fetch_batch_details(batch)
+
+                    # Update metrik kontak real-time di antarmuka GUI
+                    total_wa = sum(1 for r in self.results if r.get("whatsapp"))
+                    total_email = sum(1 for r in self.results if r.get("email"))
+                    self.status_callback(
+                        f"Halaman {current_page}: {len(self.results)}{total_display} data...",
+                        prog,
+                        {"total": len(self.results), "wa": total_wa, "email": total_email}
+                    )
 
                     if len(self.results) % AUTOSAVE_INTERVAL == 0:
                         self._auto_save()
 
-                    wa_log = contact["whatsapp"] or "-"
-                    em_log = contact["email"] or "-"
+                    # Jeda acak 4.0 - 5.5 detik antar-batch agar server tidak mendeteksi pola konstan
+                    if b_idx + 1 < total_batches:
+                        batch_delay = random.uniform(BATCH_INTERVAL_MIN, BATCH_INTERVAL_MAX)
+                        if not self._sleep_with_cancel(batch_delay):
+                            break
 
-                    if not fetch_details:
-                        self.log(f"[{global_no - 1}] {nama_bu}")
-                    elif contact["whatsapp"] or contact["email"] or contact["telepon"]:
-                        self.log(f"[{global_no - 1}] {nama_bu} | WA: {wa_log} | Email: {em_log}")
-                    elif detail_success:
-                        extra_alamat = f" (Alamat: {contact['alamat'][:35]}...)" if contact['alamat'] else ""
-                        self.log(f"[{global_no - 1}] {nama_bu} | Detail dimuat (Kontak tidak dicantumkan di LPJK){extra_alamat}")
-                    else:
-                        # Tandai baris ini untuk second pass
-                        self.skipped_items.append({"item": item, "tds_idx": len(self.results) - 1})
-                        self.log(f"[{global_no - 1}] ⚠️ {nama_bu} | Gagal memuat detail — ditandai untuk second pass")
-
-                except Exception as e:
-                    self.log(f"Error parsing baris {row_idx + 1}: {e}")
+            total_wa = sum(1 for r in self.results if r.get("whatsapp"))
+            total_email = sum(1 for r in self.results if r.get("email"))
 
             self.status_callback(
                 f"Halaman {current_page} selesai. Total: {len(self.results)}{total_display}",
@@ -495,17 +718,20 @@ class LPJKScraper:
                 {"total": len(self.results), "wa": total_wa, "email": total_email}
             )
 
-            try:
-                next_btn = self.driver.find_element(By.ID, "TABLE_1_next")
-                if "disabled" in (next_btn.get_attribute("class") or ""):
-                    self.log("Halaman terakhir tercapai.")
+            # 3. Navigasi ke halaman berikutnya dengan Micro-Cooldown & Robust Retry
+            if fetch_details and self.is_running:
+                page_break = random.uniform(PAGE_COOLDOWN_MIN, PAGE_COOLDOWN_MAX)
+                self.log(f"☕ Istirahat {page_break:.1f} detik antar-halaman untuk me-reset kuota limit server LPJK...")
+                if not self._sleep_with_cancel(page_break):
                     break
-                self.driver.execute_script("arguments[0].click();", next_btn.find_element(By.TAG_NAME, "a"))
-                time.sleep(2)
-                current_page += 1
-            except Exception as e:
-                self.log(f"Navigasi halaman berikutnya gagal: {e}")
+
+            nav_status = self._navigate_to_next_page(current_page, current_first_text)
+            if nav_status == "last_page":
                 break
+            elif nav_status in ("stopped", "failed"):
+                break
+            elif nav_status == "success":
+                current_page += 1
 
         return total_wa, total_email
 
@@ -525,73 +751,40 @@ class LPJKScraper:
         )
 
         recovered = 0
-        for idx, skip_info in enumerate(self.skipped_items):
+        batch_size = 2  # Pada second pass gunakan batch 2 agar lebih santai
+        total_batches = (total_skipped + batch_size - 1) // batch_size
+
+        for b_idx in range(total_batches):
             if not self.is_running:
                 break
 
-            item = skip_info["item"]
-            result_idx = skip_info["tds_idx"]
-            nama_bu = item["nama"]
+            b_start = b_idx * batch_size
+            chunk = self.skipped_items[b_start:b_start + batch_size]
+            batch_for_fetch = []
+            for skip_info in chunk:
+                item = skip_info["item"]
+                detail_url = f"https://lpjk.pu.go.id/laporan-lpjk/sebaran/detail/{item.get('npwp', '')}"
+                batch_for_fetch.append({
+                    "item": item,
+                    "detail_href": detail_url,
+                    "detail_btn": None
+                })
 
-            self.log(f"[Second Pass {idx + 1}/{total_skipped}] Retry: {nama_bu}...")
-            self.status_callback(
-                f"Second Pass {idx + 1}/{total_skipped}: {nama_bu[:40]}...",
-                0.95,
-                {"total": len(self.results), "wa": sum(1 for r in self.results if r.get('whatsapp')), "email": sum(1 for r in self.results if r.get('email'))}
-            )
+            self._fetch_batch_details(batch_for_fetch)
 
-            # Navigasi ke halaman LPJK dan coba fetch langsung via URL detail
-            # Kita manfaatkan URL yang sebelumnya tersimpan di data-attr
-            # Karena tds tidak tersedia, kita gunakan requests langsung via AJAX dengan NPWP
-            detail_url = f"https://lpjk.pu.go.id/laporan-lpjk/sebaran/detail/{item.get('npwp', '')}"
-            detail_html = ""
-            try:
-                script = f"""
-                var done = arguments[arguments.length - 1];
-                $.ajax({{
-                    url: '{detail_url}',
-                    type: 'GET',
-                    timeout: 12000,
-                    success: function(data) {{ done({{ status: 200, html: data }}); }},
-                    error: function(xhr) {{ done({{ status: xhr.status || 0, html: '' }}); }}
-                }});
-                """
-                res = self.driver.execute_async_script(script)
-                status = res.get("status", 0) if isinstance(res, dict) else 0
-                html_content = res.get("html", "") if isinstance(res, dict) else ""
-                if status == 200 and html_content and len(html_content.strip()) > 50:
-                    detail_html = html_content
-            except Exception as e:
-                self.log(f"  Gagal second pass AJAX: {e}")
-
-            if detail_html:
-                contact = extract_contact_info(detail_html)
-                # Update data di self.results
-                if result_idx < len(self.results):
-                    self.results[result_idx].update({
-                        "whatsapp": contact["whatsapp"],
-                        "wa_link": contact["wa_link"],
-                        "email": contact["email"],
-                        "telepon": contact["telepon"],
-                        "pimpinan": contact["pimpinan"],
-                        "alamat": contact["alamat"],
-                    })
-                    # Update tampilan di tabel GUI
-                    self.update_row_callback(self.results[result_idx])
+            for skip_info in chunk:
+                item = skip_info["item"]
+                if item.get("whatsapp") or item.get("email") or item.get("alamat"):
                     recovered += 1
-                    wa_log = contact["whatsapp"] or "-"
-                    em_log = contact["email"] or "-"
-                    self.log(f"  ✅ Berhasil! | WA: {wa_log} | Email: {em_log}")
-            else:
-                self.log(f"  ❌ Tetap gagal setelah second pass.")
 
-            # Cooldown antar baris second pass lebih santai
-            time.sleep(random.uniform(2.0, 3.5))
+            if b_idx + 1 < total_batches:
+                self._sleep_with_cancel(random.uniform(BATCH_INTERVAL_MIN, BATCH_INTERVAL_MAX))
 
         self.skipped_items = []
         self.log("-" * 50)
         self.log(f"🔄 Second Pass selesai. {recovered}/{total_skipped} data berhasil dipulihkan.")
         self.log("-" * 50)
+
 
     def scrape(self, keyword="", jenis="nama", provinsi="", kabupaten="", kualifikasi="",
                max_pages=0, fetch_details=True, headless=False):
